@@ -21,6 +21,10 @@ from gridfm_graphkit.datasets.globals import (
     ANG_MIN,
     ANG_MAX,
     B_ON,
+    YFF_TT_R,
+    YFF_TT_I,
+    YFT_TF_R,
+    YFT_TF_I,
 )
 
 from gridfm_graphkit.tasks.reconstruction_tasks import ReconstructionTask
@@ -186,6 +190,12 @@ def _compute_branch_data(
         "angle_excess_high_target":  _np(angle_excess_high_target),
         "thermal_excess":            _np(thermal_excess),
         "thermal_excess_target":     _np(thermal_excess_target),
+        # Fields needed for current-based loading computation
+        "rate_a":                    _np(branch_thermal_limits),
+        "Yff_r":                     _np(bus_edge_attr[:, YFF_TT_R]),
+        "Yff_i":                     _np(bus_edge_attr[:, YFF_TT_I]),
+        "Yft_r":                     _np(bus_edge_attr[:, YFT_TF_R]),
+        "Yft_i":                     _np(bus_edge_attr[:, YFT_TF_I]),
     }
 
 
