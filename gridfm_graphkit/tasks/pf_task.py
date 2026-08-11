@@ -16,6 +16,11 @@ from gridfm_graphkit.datasets.globals import (
     VA_OUT,
     PG_OUT,
     QG_OUT,
+    # for branch features
+    RATE_A,
+    ANG_MIN,
+    ANG_MAX,
+    B_ON,
 )
 
 from gridfm_graphkit.tasks.reconstruction_tasks import ReconstructionTask
@@ -492,7 +497,7 @@ class PowerFlowTask(ReconstructionTask):
         mask_PV = batch.mask_dict["PV"]
         mask_REF = batch.mask_dict["REF"]
 
-        return {
+        bus_data = {
             "scenario": scenario_ids.cpu().numpy(),
             "bus": local_bus_idx.cpu().numpy(),
             "Pd": bus_x[:, PD_H].cpu().numpy(),
@@ -516,3 +521,44 @@ class PowerFlowTask(ReconstructionTask):
             "reactive res. (MVar)": residual_Q.detach().cpu().numpy(),
             "PBE": residual_mva.detach().cpu().numpy(),
         }
+
+
+        # ── branch-level outputs ──────────────────────────────────────────────────
+        from_bus_idx = bus_edge_index[0]
+        to_bus_idx = bus_edge_index[1]
+
+        # Compute branch angle difference violation
+        angle_min = bus_edge_attr[:, ANG_MIN] * torch.pi / 180.0 # convert to radians for comparison
+        angle_max = bus_edge_attr[:, ANG_MAX] * torch.pi / 180.0 # convert to radians for comparison
+        
+        bus_angles = eval_bus[:, VA_OUT]
+        angle_diff = bus_angles[from_bus_idx] - bus_angles[to_bus_idx]
+        angle_diff = (angle_diff + torch.pi) % (
+            2 * torch.pi
+        ) - torch.pi  # wrap to [-pi, pi]
+        angle_excess_low = F.relu(angle_min - angle_diff)
+        angle_excess_high = F.relu(angle_diff - angle_max)
+
+        # Compute branch thermal limits violations
+        Sft = torch.sqrt(Pft**2 + Qft**2)
+        branch_thermal_limits = bus_edge_attr[:, RATE_A]
+        branch_thermal_excess = F.relu(Sft - branch_thermal_limits)
+
+        branch_data = {
+            "scenario": scenario_ids[from_bus_idx].cpu().numpy(),
+            "from_bus": local_bus_idx[from_bus_idx].detach().cpu().numpy(),
+            "to_bus": local_bus_idx[to_bus_idx].detach().cpu().numpy(),
+            "Pft": Pft.detach().cpu().numpy(),
+            "Qft": Qft.detach().cpu().numpy(),
+            "angle_diff": angle_diff.detach().cpu().numpy(),
+            "angle_excess_low": angle_excess_low.detach().cpu().numpy(),
+            "angle_excess_high": angle_excess_high.detach().cpu().numpy(),
+            "thermal_excess": branch_thermal_excess.detach().cpu().numpy(),
+        }
+        # ─────────────────────────────────────────────────────────────────────────
+
+        return {
+            "bus": bus_data,
+            "branch": branch_data,
+        }
+
