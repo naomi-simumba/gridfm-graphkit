@@ -539,10 +539,15 @@ class PowerFlowTask(ReconstructionTask):
         angle_excess_low = F.relu(angle_min - angle_diff)
         angle_excess_high = F.relu(angle_diff - angle_max)
 
-        # Compute branch thermal limits violations
+        # Compute branch thermal limits violations including predicted values
         Sft = torch.sqrt(Pft**2 + Qft**2)
         branch_thermal_limits = bus_edge_attr[:, RATE_A]
         branch_thermal_excess = F.relu(Sft - branch_thermal_limits)
+
+        # Compute branch thermal limits violations with ground truth values only
+        Pft_target, Qft_target = branch_flow_layer(target, bus_edge_index, bus_edge_attr)
+        Sft_target = torch.sqrt(Pft_target**2 + Qft_target**2)
+        branch_thermal_excess_target = F.relu(Sft_target - branch_thermal_limits)
 
         branch_data = {
             "scenario": scenario_ids[from_bus_idx].cpu().numpy(),
@@ -554,6 +559,7 @@ class PowerFlowTask(ReconstructionTask):
             "angle_excess_low": angle_excess_low.detach().cpu().numpy(),
             "angle_excess_high": angle_excess_high.detach().cpu().numpy(),
             "thermal_excess": branch_thermal_excess.detach().cpu().numpy(),
+            "thermal_excess_target": branch_thermal_excess_target.detach().cpu().numpy(),
         }
         # ─────────────────────────────────────────────────────────────────────────
 
