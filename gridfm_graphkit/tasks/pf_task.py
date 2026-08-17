@@ -27,6 +27,7 @@ from gridfm_graphkit.datasets.globals import (
     YFT_TF_I,
 )
 
+from gridfm_graphkit.datasets.masking import RemovePFMask
 from gridfm_graphkit.tasks.reconstruction_tasks import ReconstructionTask
 from gridfm_graphkit.io.registries import TASK_REGISTRY
 from gridfm_graphkit.tasks.utils import (
@@ -216,8 +217,13 @@ class PowerFlowTask(ReconstructionTask):
         output, loss_dict = self.shared_step(batch)
         dataset_name = self.args.data.networks[dataloader_idx]
 
+
+        print(f"\n\n BEFORE INVERSE TRANSFORM: {batch.x_dict["bus"]}")
+
+
         self.data_normalizers[dataloader_idx].inverse_transform(batch)
         self.data_normalizers[dataloader_idx].inverse_output(output, batch)
+        RemovePFMask()(batch)
 
         branch_flow_layer = ComputeBranchFlow()
         node_injection_layer = ComputeNodeInjection()
@@ -520,6 +526,8 @@ class PowerFlowTask(ReconstructionTask):
         else:
             output, embeddings = self.model(batch), None
 
+        print(f"\n\n BEFORE INVERSE TRANSFORM: {batch.x_dict["bus"]}")
+
         self.data_normalizers[dataloader_idx].inverse_transform(
             batch,
         )  # normalize the batch data back to the original scale
@@ -527,6 +535,7 @@ class PowerFlowTask(ReconstructionTask):
             output,
             batch,
         )  # inverse transform the predicted output back to the original scale
+        RemovePFMask()(batch)
 
         branch_flow_layer = ComputeBranchFlow()  # layer to compute the branch flows
         node_injection_layer = (
@@ -586,6 +595,24 @@ class PowerFlowTask(ReconstructionTask):
         mask_PV = batch.mask_dict["PV"]
         mask_REF = batch.mask_dict["REF"]
 
+        print(f"\n\n\\n\n AFTER INVERSE TRANSFORM: {bus_x.cpu().numpy()}")
+
+        print(f"{PD_H=}")
+        print(f"{QD_H=}")
+        print(f"{MIN_VM_H=}")
+        print(f"{MAX_VM_H=}")
+        print(f"{MIN_QG_H=}")
+        print(f"{MAX_QG_H=}")
+
+
+        print(f"{VM_H=}")
+        print(f"{VA_H=}")
+        print(f"{QG_H=}")
+        
+
+
+
+
         bus_data = {
             "scenario": scenario_ids.cpu().numpy(),
             "bus": local_bus_idx.cpu().numpy(),
@@ -610,20 +637,7 @@ class PowerFlowTask(ReconstructionTask):
             "reactive res. (MVar)": residual_Q.detach().cpu().numpy(),
             "PBE": residual_mva.detach().cpu().numpy(),
         }
-        if embeddings is None or "bus" not in embeddings:
-            return prediction_table
-        return {
-            "bus": prediction_table,
-            "bus_embeddings": embedding_table_from_tensor(
-                embeddings["bus"],
-                id_columns={
-                    "scenario": scenario_ids.cpu().numpy(),
-                    "bus": local_bus_idx.cpu().numpy(),
-                },
-            ),
-        }
-
-
+    
         branch_data = _compute_branch_data(
             eval_bus,
             target,
@@ -633,8 +647,23 @@ class PowerFlowTask(ReconstructionTask):
             local_bus_idx,
         )
 
+        print(f"\n\n\\n\n AFTER INVERSE TRANSFORM: {bus_edge_attr.cpu().numpy()}")
+        
+
+        if embeddings is None or "bus" not in embeddings:
+            return {
+            "bus": bus_data,
+            "branch": branch_data,
+        }
         return {
             "bus": bus_data,
             "branch": branch_data,
+            "bus_embeddings": embedding_table_from_tensor(
+                embeddings["bus"],
+                id_columns={
+                    "scenario": scenario_ids.cpu().numpy(),
+                    "bus": local_bus_idx.cpu().numpy(),
+                },
+            ),
         }
 
