@@ -16,8 +16,18 @@ from gridfm_graphkit.datasets.globals import (
     VA_OUT,
     PG_OUT,
     QG_OUT,
+    # for branch features
+    RATE_A,
+    ANG_MIN,
+    ANG_MAX,
+    B_ON,
+    YFF_TT_R,
+    YFF_TT_I,
+    YFT_TF_R,
+    YFT_TF_I,
 )
 
+from gridfm_graphkit.datasets.masking import RemovePFMask
 from gridfm_graphkit.tasks.reconstruction_tasks import ReconstructionTask
 from gridfm_graphkit.io.registries import TASK_REGISTRY
 from gridfm_graphkit.tasks.utils import (
@@ -110,6 +120,88 @@ def _clamp_known_to_ground_truth(output_bus, target, batch, gen_to_bus_index, nu
     return eval_bus
 
 
+def _compute_branch_data(
+    eval_bus,
+    target,
+    bus_edge_index,
+    bus_edge_attr,
+    scenario_ids,
+    local_bus_idx,
+):
+    """Compute branch-level predictions and ground-truth constraint violations.
+
+    Args:
+        eval_bus:       Clamped model predictions [num_bus, 4]. Branch flows
+                        and angle violations are computed from this.
+        target:         Ground truth bus tensor [num_bus, 4]. Target branch
+                        flows and angle violations are computed from this.
+        bus_edge_index: Edge index [2, num_edges] (batch-global bus indices).
+        bus_edge_attr:  Edge features [num_edges, num_edge_features].
+        scenario_ids:   Scenario ID per bus [num_bus] (batch-global).
+        local_bus_idx:  Per-graph local bus index [num_bus].
+
+    Returns:
+        dict of numpy arrays, one entry per directed edge.
+    """
+    branch_flow_layer = ComputeBranchFlow()
+
+    from_bus_idx = bus_edge_index[0]
+    to_bus_idx   = bus_edge_index[1]
+
+    # Branch limits — ANG_MIN/ANG_MAX restored to degrees by inverse_transform;
+    # convert to radians to match VA_OUT which stays in radians.
+    angle_min = bus_edge_attr[:, ANG_MIN] * torch.pi / 180.0
+    angle_max = bus_edge_attr[:, ANG_MAX] * torch.pi / 180.0
+    branch_thermal_limits = bus_edge_attr[:, RATE_A]
+
+    def _branch_flows(bus_state):
+        Pft, Qft = branch_flow_layer(bus_state, bus_edge_index, bus_edge_attr)
+        Sft = torch.sqrt(Pft**2 + Qft**2)
+        thermal_excess = F.relu(Sft - branch_thermal_limits)
+        return Pft, Qft, thermal_excess
+
+    def _angle_violations(bus_state):
+        angles = bus_state[:, VA_OUT]
+        diff = angles[from_bus_idx] - angles[to_bus_idx]
+        diff = (diff + torch.pi) % (2 * torch.pi) - torch.pi  # wrap to [-pi, pi]
+        return diff, F.relu(angle_min - diff), F.relu(diff - angle_max)
+
+    # Predicted
+    Pft, Qft, thermal_excess = _branch_flows(eval_bus)
+    angle_diff, angle_excess_low, angle_excess_high = _angle_violations(eval_bus)
+
+    # Ground truth
+    Pft_target, Qft_target, thermal_excess_target = _branch_flows(target)
+    angle_diff_target, angle_excess_low_target, angle_excess_high_target = _angle_violations(target)
+
+    def _np(t):
+        return t.detach().cpu().numpy()
+
+    return {
+        "scenario":                  scenario_ids[from_bus_idx].cpu().numpy(),
+        "from_bus":                  local_bus_idx[from_bus_idx].cpu().numpy(),
+        "to_bus":                    local_bus_idx[to_bus_idx].cpu().numpy(),
+        "Pft":                       _np(Pft),
+        "Qft":                       _np(Qft),
+        "Pft_target":                _np(Pft_target),
+        "Qft_target":                _np(Qft_target),
+        "angle_diff":                _np(angle_diff),
+        "angle_excess_low":          _np(angle_excess_low),
+        "angle_excess_high":         _np(angle_excess_high),
+        "angle_diff_target":         _np(angle_diff_target),
+        "angle_excess_low_target":   _np(angle_excess_low_target),
+        "angle_excess_high_target":  _np(angle_excess_high_target),
+        "thermal_excess":            _np(thermal_excess),
+        "thermal_excess_target":     _np(thermal_excess_target),
+        # Fields needed for current-based loading computation
+        "rate_a":                    _np(branch_thermal_limits),
+        "Yff_r":                     _np(bus_edge_attr[:, YFF_TT_R]),
+        "Yff_i":                     _np(bus_edge_attr[:, YFF_TT_I]),
+        "Yft_r":                     _np(bus_edge_attr[:, YFT_TF_R]),
+        "Yft_i":                     _np(bus_edge_attr[:, YFT_TF_I]),
+    }
+
+
 @TASK_REGISTRY.register("PowerFlow")
 class PowerFlowTask(ReconstructionTask):
     """
@@ -125,8 +217,10 @@ class PowerFlowTask(ReconstructionTask):
         output, loss_dict = self.shared_step(batch)
         dataset_name = self.args.data.networks[dataloader_idx]
 
+
         self.data_normalizers[dataloader_idx].inverse_transform(batch)
         self.data_normalizers[dataloader_idx].inverse_output(output, batch)
+        RemovePFMask()(batch)
 
         branch_flow_layer = ComputeBranchFlow()
         node_injection_layer = ComputeNodeInjection()
@@ -436,6 +530,7 @@ class PowerFlowTask(ReconstructionTask):
             output,
             batch,
         )  # inverse transform the predicted output back to the original scale
+        RemovePFMask()(batch)
 
         branch_flow_layer = ComputeBranchFlow()  # layer to compute the branch flows
         node_injection_layer = (
@@ -495,7 +590,7 @@ class PowerFlowTask(ReconstructionTask):
         mask_PV = batch.mask_dict["PV"]
         mask_REF = batch.mask_dict["REF"]
 
-        prediction_table = {
+        bus_data = {
             "scenario": scenario_ids.cpu().numpy(),
             "bus": local_bus_idx.cpu().numpy(),
             "Pd": bus_x[:, PD_H].cpu().numpy(),
@@ -519,10 +614,24 @@ class PowerFlowTask(ReconstructionTask):
             "reactive res. (MVar)": residual_Q.detach().cpu().numpy(),
             "PBE": residual_mva.detach().cpu().numpy(),
         }
+    
+        branch_data = _compute_branch_data(
+            eval_bus,
+            target,
+            bus_edge_index,
+            bus_edge_attr,
+            scenario_ids,
+            local_bus_idx,
+        )        
+
         if embeddings is None or "bus" not in embeddings:
-            return prediction_table
+            return {
+            "bus": bus_data,
+            "branch": branch_data,
+        }
         return {
-            "bus": prediction_table,
+            "bus": bus_data,
+            "branch": branch_data,
             "bus_embeddings": embedding_table_from_tensor(
                 embeddings["bus"],
                 id_columns={
@@ -531,3 +640,4 @@ class PowerFlowTask(ReconstructionTask):
                 },
             ),
         }
+
