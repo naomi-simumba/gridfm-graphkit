@@ -218,9 +218,6 @@ class PowerFlowTask(ReconstructionTask):
         dataset_name = self.args.data.networks[dataloader_idx]
 
 
-        print(f"\n\n BEFORE INVERSE TRANSFORM: {batch.x_dict["bus"]}")
-
-
         self.data_normalizers[dataloader_idx].inverse_transform(batch)
         self.data_normalizers[dataloader_idx].inverse_output(output, batch)
         RemovePFMask()(batch)
@@ -526,8 +523,6 @@ class PowerFlowTask(ReconstructionTask):
         else:
             output, embeddings = self.model(batch), None
 
-        print(f"\n\n BEFORE INVERSE TRANSFORM: {batch.x_dict["bus"]}")
-
         self.data_normalizers[dataloader_idx].inverse_transform(
             batch,
         )  # normalize the batch data back to the original scale
@@ -595,24 +590,6 @@ class PowerFlowTask(ReconstructionTask):
         mask_PV = batch.mask_dict["PV"]
         mask_REF = batch.mask_dict["REF"]
 
-        print(f"\n\n\\n\n AFTER INVERSE TRANSFORM: {bus_x.cpu().numpy()}")
-
-        print(f"{PD_H=}")
-        print(f"{QD_H=}")
-        print(f"{MIN_VM_H=}")
-        print(f"{MAX_VM_H=}")
-        print(f"{MIN_QG_H=}")
-        print(f"{MAX_QG_H=}")
-
-
-        print(f"{VM_H=}")
-        print(f"{VA_H=}")
-        print(f"{QG_H=}")
-        
-
-
-
-
         bus_data = {
             "scenario": scenario_ids.cpu().numpy(),
             "bus": local_bus_idx.cpu().numpy(),
@@ -645,10 +622,7 @@ class PowerFlowTask(ReconstructionTask):
             bus_edge_attr,
             scenario_ids,
             local_bus_idx,
-        )
-
-        print(f"\n\n\\n\n AFTER INVERSE TRANSFORM: {bus_edge_attr.cpu().numpy()}")
-        
+        )        
 
         if embeddings is None or "bus" not in embeddings:
             return {
